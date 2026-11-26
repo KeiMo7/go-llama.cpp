@@ -5,6 +5,8 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 extern unsigned char tokenCallback(void *, char *);
 
@@ -54,8 +56,30 @@ int llama_tokenize_string(void* params_ptr, void* state_pr, int* result);
 
 int llama_predict(void* params_ptr, void* state_pr, char* result, bool debug);
 
+// Shared model binding: one model handle, many contexts (used by the
+// session manager). Appended without changing any existing declaration.
+void* llama_binding_load_shared_model(const char* fname, bool mmap, bool mlock,
+                                      const char* lora, const char* lora_base);
+void  llama_binding_free_shared_model(void* model_ptr);
+int64_t llama_binding_model_bytes(void* model_ptr);
+int   llama_binding_model_vocab_type(void* model_ptr);
+
+void* llama_binding_new_context(void* model_ptr, int n_ctx, int n_batch,
+                                int n_threads, bool f16_kv);
+void  llama_binding_free_context(void* ctx_ptr);
+int   llama_binding_eval(void* ctx_ptr, const int* tokens, int n_tokens,
+                         int n_past, int n_threads);
+int   llama_binding_tokenize(void* model_ptr, const char* text,
+                             int* tokens, int n_max_tokens, bool add_bos);
+size_t llama_binding_state_size(void* ctx_ptr);
+size_t llama_binding_copy_state(void* ctx_ptr, uint8_t* dst);
+size_t llama_binding_set_state(void* ctx_ptr, const uint8_t* src);int   llama_binding_kv_token_count(void* ctx_ptr);
+int64_t llama_binding_context_bytes(void* ctx_ptr);
+
 #ifdef __cplusplus
 }
+
+
 
 
 std::vector<std::string> create_vector(const char** strings, int count);

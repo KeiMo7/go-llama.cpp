@@ -809,6 +809,165 @@ void llama_binding_free_model(void *state_ptr) {
     delete ctx->model;
 }
 
+// ---------------------------------------------------------------------------
+// Shared model binding: one llama_model handle shared by several contexts.
+// Appended for the session manager; existing functions are untouched.
+// ---------------------------------------------------------------------------
+
+struct llama_binding_shared_model {
+    llama_model * model;
+};
+
+void* llama_binding_load_shared_model(const char* fname, bool mmap, bool mlock,
+                                      const char* lora, const char* lora_base) {
+    auto* shared = new (std::nothrow) llama_binding_shared_model;
+    if (shared == NULL) {
+        return NULL;
+    }
+
+    llama_context_params lparams = llama_context_default_params();
+    lparams.vocab_only = false;
+    lparams.use_mmap   = mmap;
+    lparams.use_mlock  = mlock;
+
+    shared->model = llama_load_model_from_file(fname, lparams);
+    if (shared->model == NULL) {
+        fprintf(stderr, "%s: error: unable to load model\n", __func__);
+        delete shared;
+        return NULL;
+    }
+
+    if (lora != NULL && lora[0] != '\0') {
+        const char* base = (lora_base != NULL && lora_base[0] != '\0') ? lora_base : NULL;
+        if (llama_model_apply_lora_from_file(shared->model, lora, base, 0) != 0) {
+            fprintf(stderr, "%s: error: failed to apply lora adapter\n", __func__);
+            llama_free_model(shared->model);
+            delete shared;
+            return NULL;
+        }
+    }
+
+    return shared;
+}
+
+void llama_binding_free_shared_model(void* model_ptr) {
+    if (model_ptr == NULL) {
+        return;
+    }
+    llama_binding_shared_model* shared = (llama_binding_shared_model*) model_ptr;
+    if (shared->model != NULL) {
+        llama_free_model(shared->model);
+        shared->model = NULL;
+    }
+    delete shared;
+}
+
+int64_t llama_binding_model_bytes(void* model_ptr) {
+    if (model_ptr == NULL) {
+        return 0;
+    }
+    llama_binding_shared_model* shared = (llama_binding_shared_model*) model_ptr;
+    return (int64_t) llama_model_size(shared->model);
+}
+
+int llama_binding_model_vocab_type(void* model_ptr) {
+    if (model_ptr == NULL) {
+        return (int) LLAMA_VOCAB_TYPE_SPM;
+    }
+    llama_binding_shared_model* shared = (llama_binding_shared_model*) model_ptr;
+
+    // The vocab type is only exposed through a context. A minimal context is
+    // cheap to create and is discarded immediately; the result never changes
+    // for a given model, so the Go side queries it once.
+    llama_context_params lparams = llama_context_default_params();
+    lparams.n_ctx   = 8;
+    lparams.n_batch = 8;
+    llama_context* ctx = llama_new_context_with_model(shared->model, lparams);
+    if (ctx == NULL) {
+        return (int) LLAMA_VOCAB_TYPE_SPM;
+    }
+    const int type = (int) llama_vocab_type(ctx);
+    llama_free(ctx);
+    return type;
+}
+
+void* llama_binding_new_context(void* model_ptr, int n_ctx, int n_batch,
+                                int n_threads, bool f16_kv) {
+    (void) n_threads;
+    if (model_ptr == NULL) {
+        return NULL;
+    }
+    llama_binding_shared_model* shared = (llama_binding_shared_model*) model_ptr;
+
+    llama_context_params lparams = llama_context_default_params();
+    lparams.n_ctx   = n_ctx;
+    lparams.n_batch = n_batch;
+    lparams.f16_kv  = f16_kv;
+
+    return llama_new_context_with_model(shared->model, lparams);
+}
+
+void llama_binding_free_context(void* ctx_ptr) {
+    if (ctx_ptr == NULL) {
+        return;
+    }
+    llama_free((llama_context*) ctx_ptr);
+}
+
+int llama_binding_eval(void* ctx_ptr, const int* tokens, int n_tokens,
+                       int n_past, int n_threads) {
+    if (ctx_ptr == NULL || tokens == NULL || n_tokens <= 0) {
+        return 1;
+    }
+    return llama_eval((llama_context*) ctx_ptr, tokens, n_tokens, n_past, n_threads);
+}
+
+int llama_binding_tokenize(void* model_ptr, const char* text,
+                           int* tokens, int n_max_tokens, bool add_bos) {
+    if (model_ptr == NULL || text == NULL || tokens == NULL) {
+        return -1;
+    }
+    llama_binding_shared_model* shared = (llama_binding_shared_model*) model_ptr;
+    return llama_tokenize_with_model(shared->model, text, (int) strlen(text),
+                                     tokens, n_max_tokens, add_bos);
+}
+
+size_t llama_binding_state_size(void* ctx_ptr) {
+    if (ctx_ptr == NULL) {
+        return 0;
+    }
+    return llama_get_state_size((llama_context*) ctx_ptr);
+}
+
+size_t llama_binding_copy_state(void* ctx_ptr, uint8_t* dst) {
+    if (ctx_ptr == NULL || dst == NULL) {
+        return 0;
+    }
+    return llama_copy_state_data((llama_context*) ctx_ptr, dst);
+}
+
+size_t llama_binding_set_state(void* ctx_ptr, const uint8_t* src) {
+    if (ctx_ptr == NULL || src == NULL) {
+        return 0;
+    }
+    return llama_set_state_data((llama_context*) ctx_ptr, (uint8_t*) src);
+}
+int llama_binding_kv_token_count(void* ctx_ptr) {
+    if (ctx_ptr == NULL) {
+        return 0;
+    }
+    return llama_get_kv_cache_token_count((llama_context*) ctx_ptr);
+}
+
+int64_t llama_binding_context_bytes(void* ctx_ptr) {
+    if (ctx_ptr == NULL) {
+        return 0;
+    }
+    // The serialized state covers the KV cache plus rng/logits/embedding
+    // state, which is the stable per-context footprint llama.cpp exposes.
+    return (int64_t) llama_get_state_size((llama_context*) ctx_ptr);
+}
+
 void llama_free_params(void* params_ptr) {
     gpt_params* params = (gpt_params*) params_ptr;
     delete params;
